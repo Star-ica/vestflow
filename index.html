@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VestFlow · BOT Chain Testnet</title>
+<meta name="description" content="Lock tokens with a cliff and release them linearly.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand"><h1 id="appName">VestFlow</h1><p id="tagline">Lock tokens with a cliff and release them linearly.</p></div>
+  <div class="wallet"><span id="netBadge" class="badge">Not connected</span><button id="connectBtn" class="btn primary" type="button">Connect wallet</button></div>
+</header>
+<main>
+  <section class="card" aria-labelledby="setupH">
+    <h2 id="setupH">Contract</h2>
+    <p class="desc" id="aboutText"></p>
+    <div class="row">
+      <label>Contract address on BOT Chain testnet<input id="addrInput" class="mono" placeholder="0x… (or deploy a fresh copy)" autocomplete="off"></label>
+      <button id="saveBtn" class="btn" type="button">Use this address</button>
+      <button id="deployBtn" class="btn primary" type="button">Deploy new copy</button>
+    </div>
+    <p class="desc" style="margin:10px 0 0">Deployed: <span id="contractLink">not yet</span></p>
+  </section>
+  <section class="card" id="tokens"></section>
+  <section class="stats" id="stats" aria-label="Live numbers"></section>
+  <p class="sec">Actions</p>
+  <section class="grid" id="actions"></section>
+  <p class="sec">Lookups</p>
+  <section class="grid" id="views"></section>
+</main>
+<div class="status" id="status" role="status" aria-live="polite"></div>
+<footer class="foot">
+  <span>BOT Chain Testnet · Chain ID 968 · RPC rpc.bohr.life</span>
+  <nav aria-label="BOT Chain links">
+    <a class="btn" href="https://botchain.ai" target="_blank" rel="noopener">Botchain</a>
+    <a class="btn" href="https://scan.botchain.ai" target="_blank" rel="noopener">Explorer</a>
+  </nav>
+</footer>
+<script src="lib/ethers.umd.min.js"></script>
+<script src="config.js"></script>
+<script src="artifacts.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
