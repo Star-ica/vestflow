@@ -1,13 +1,11 @@
 (function () {
   "use strict";
   var ethers = window.ethers, C = window.APP_CONFIG, A = window.ARTIFACTS;
-  // BOT Chain testnet. The native currency symbol is an assumption: edit it if the chain docs say otherwise.
-  var CHAIN = { id: 968, hex: "0x3c8", name: "BOT Chain Testnet", rpc: "https://rpc.bohr.life", explorer: "https://scan.botchain.ai", currency: { name: "BOT", symbol: "BOT", decimals: 18 } };
-  var KEY = "botchain968:" + C.slug;
+  // BOT Chain mainnet
+  var CHAIN = { id: 677, hex: "0x2a5", name: "BOT Chain Mainnet", rpc: "https://rpc.botchain.ai", explorer: "https://scan.botchain.ai", currency: { name: "BOT", symbol: "BOT", decimals: 18 } };
   var $ = function (s) { return document.querySelector(s); };
-  var account = null, signer = null, mainAddr = "";
-  try { mainAddr = localStorage.getItem(KEY) || ""; } catch (e) {}
-  if (!mainAddr) mainAddr = C.address || "";
+  // Address comes only from config.js (no localStorage override that could point at an old testnet deploy)
+  var account = null, mainAddr = C.address || "", txBusy = false, isOwner = false;
   var readProvider = new ethers.JsonRpcProvider(CHAIN.rpc, CHAIN.id, { staticNetwork: ethers.Network.from(CHAIN.id) });
 
   function h(tag, attrs) {
@@ -44,6 +42,7 @@
       if (C.enums && C.enums[name]) return C.enums[name][Number(v)] || String(v);
       if ((C.amountFields || []).indexOf(name) > -1) return units(v);
       if ((C.timeFields || []).indexOf(name) > -1) return fmt("time", v);
+      if ((C.bpsFields || []).indexOf(name) > -1) return fmt("bps", v);
       return String(v);
     }
     if (typeof v === "boolean") return fmt("bool", v);
@@ -63,53 +62,95 @@
     return d;
   }
   var errText = function (e) { return (e && (e.shortMessage || e.reason || (e.info && e.info.error && e.info.error.message) || e.message)) || String(e); };
+  function cleanRevert(e) {
+    var m = errText(e), r = m.match(/reverted(?: with reason string)?:?\s*"?([^"\n]+)"?/i);
+    return r ? r[1].trim() : m;
+  }
+  function withTimeout(p, ms, msg) {
+    return Promise.race([p, new Promise(function (_, rej) { setTimeout(function () { rej(new Error(msg)); }, ms); })]);
+  }
 
-  // ---------- wallet ----------
-  async function switchChain() {
-    try { await window.ethereum.request({ method: "wallet_switchEthereumChain", params: [{ chainId: CHAIN.hex }] }); }
-    catch (e) {
-      if (e && (e.code === 4902 || e.code === -32603 || /unrecognized|not been added/i.test(e.message || ""))) {
-        await window.ethereum.request({ method: "wallet_addEthereumChain", params: [{ chainId: CHAIN.hex, chainName: CHAIN.name, nativeCurrency: CHAIN.currency, rpcUrls: [CHAIN.rpc], blockExplorerUrls: [CHAIN.explorer] }] });
-      } else throw e;
-    }
+ // ---------- wallet ----------
+async function switchChain() {
+  var id = parseInt(await window.ethereum.request({ method: "eth_chainId" }), 16);
+  if (id === CHAIN.id) return;
+  try {
+    await window.ethereum.request({ method: "wallet_switchEthereumChain", params: [{ chainId: CHAIN.hex }] });
+  } catch (e) {
+    if (e && (e.code === 4902 || e.code === -32603 || /unrecognized|not been added/i.test(e.message || ""))) {
+      await window.ethereum.request({
+        method: "wallet_addEthereumChain",
+        params: [{ chainId: CHAIN.hex, chainName: CHAIN.name, nativeCurrency: CHAIN.currency, rpcUrls: [CHAIN.rpc], blockExplorerUrls: [CHAIN.explorer] }]
+      });
+    } else throw e;
   }
-  async function connect() {
-    if (!window.ethereum) throw new Error("No wallet found. Install MetaMask or another EVM wallet, then reload.");
-    await window.ethereum.request({ method: "eth_requestAccounts" });
-    await switchChain();
-    signer = await new ethers.BrowserProvider(window.ethereum).getSigner();
-    account = await signer.getAddress();
-    await refreshBadge();
-    await refreshAll();
+}
+
+async function connect(quiet) {
+  if (!window.ethereum) {
+    if (!quiet) throw new Error("No wallet found. Install MetaMask or another EVM wallet, then reload.");
+    return;
   }
-  async function ensureWallet() {
-    if (!signer) await connect();
-    var id = await window.ethereum.request({ method: "eth_chainId" });
-    if (parseInt(id, 16) !== CHAIN.id) { await switchChain(); signer = await new ethers.BrowserProvider(window.ethereum).getSigner(); }
+  // eth_accounts = silent (no popup), eth_requestAccounts = popup; time out instead of hanging forever
+  var accounts = await withTimeout(
+    window.ethereum.request({ method: quiet ? "eth_accounts" : "eth_requestAccounts" }),
+    quiet ? 5000 : 60000,
+    "Wallet did not respond. Open MetaMask from the toolbar and clear pending requests."
+  );
+  if (!accounts || !accounts.length) return;
+  account = ethers.getAddress(accounts[0]);
+  try { isOwner = (await mainC().owner()).toLowerCase() === account.toLowerCase(); } catch (e) { isOwner = false; }
+  renderActions();
+  await refreshBadge();
+  await refreshAll();
+  if (!quiet) {
+    // Switch network in the background so a hidden prompt can't freeze connect
+    withTimeout(switchChain(), 60000, "switch").then(refreshBadge)
+      .catch(function () { toast("Switch your wallet to BOT Chain (677) before sending transactions", { err: true }); });
   }
+}
+
   async function refreshBadge() {
     var b = $("#netBadge"), btn = $("#connectBtn");
     if (!account) { b.textContent = "Not connected"; b.className = "badge"; btn.textContent = "Connect wallet"; return; }
     var id = parseInt(await window.ethereum.request({ method: "eth_chainId" }), 16);
     btn.textContent = short(account);
-    if (id === CHAIN.id) { b.textContent = CHAIN.name + " (968)"; b.className = "badge ok"; }
+    if (id === CHAIN.id) { b.textContent = CHAIN.name + " (677)"; b.className = "badge ok"; }
     else { b.textContent = "Wrong network (" + id + ")"; b.className = "badge bad"; }
   }
-  function runner() { return signer || readProvider; }
-  function mainC() { return new ethers.Contract(mainAddr, A.main.abi, runner()); }
-  function tokenC(addr) { return new ethers.Contract(addr, A.token.abi, runner()); }
-  async function send(label, call) {
-    await ensureWallet();
-    var t = toast(label + ": confirm in your wallet…", { sticky: true });
+  function mainC() { return new ethers.Contract(mainAddr, A.main.abi, readProvider); }
+
+  // Estimate on our own RPC (reverts show the contract's message), then hand the wallet a complete tx
+  async function send(label, fn, args, value) {
+    if (!account) await connect(false);
+    if (!account) throw new Error("Connect your wallet first");
+    if (txBusy) throw new Error("Another transaction is still pending");
+    txBusy = true;
+    var t = null, p = null;
     try {
-      var tx = await call();
-      t.remove();
-      var p = toast(label + ": pending…", { sticky: true, hash: tx.hash });
-      await tx.wait();
-      p.remove();
-      toast(label + " confirmed ✓", { hash: tx.hash });
+      await withTimeout(switchChain(), 60000, "Approve the switch to BOT Chain in your wallet");
+      value = value || 0n;
+      var data = mainC().interface.encodeFunctionData(fn, args || []);
+      var gas;
+      try { gas = await readProvider.estimateGas({ from: account, to: mainAddr, data: data, value: value }); }
+      catch (e) { throw new Error(cleanRevert(e)); }
+      t = toast(label + ": confirm in your wallet…", { sticky: true });
+      var hash = await window.ethereum.request({
+        method: "eth_sendTransaction",
+        params: [{ from: account, to: mainAddr, data: data, value: ethers.toQuantity(value), gas: ethers.toQuantity(gas * 12n / 10n) }]
+      });
+      t.remove(); t = null;
+      p = toast(label + ": pending…", { sticky: true, hash: hash });
+      var r = await readProvider.waitForTransaction(hash, 1, 180000);
+      p.remove(); p = null;
+      if (!r) throw new Error("not confirmed within 3 minutes, check the explorer");
+      if (r.status !== 1) throw new Error("transaction reverted");
+      toast(label + " confirmed ✓", { hash: hash });
       await refreshAll();
-    } catch (e) { t.remove(); toast(label + " failed: " + errText(e), { err: true }); }
+    } catch (e) {
+      if (t) t.remove(); if (p) p.remove();
+      toast(label + " failed: " + errText(e), { err: true });
+    } finally { txBusy = false; }
   }
 
   // ---------- inputs ----------
@@ -128,8 +169,13 @@
     if (inp.type === "bool") return v === "true";
     if (v === "" && !(inp.type === "address" && inp.meDefault)) throw new Error(inp.label + " is required");
     switch (inp.type) {
-      case "amount": return ethers.parseUnits(v, 18);
-      case "uint": return BigInt(v);
+      case "amount":
+        var amt = ethers.parseUnits(v, 18);
+        if (amt <= 0n) throw new Error(inp.label + " must be greater than 0");
+        return amt;
+      case "uint":
+        if (!/^\d+$/.test(v)) throw new Error(inp.label + " must be a whole number");
+        return BigInt(v);
       case "days": return BigInt(v) * 86400n;
       case "daysFromNow": return BigInt(Math.floor(Date.now() / 1000)) + BigInt(v) * 86400n;
       case "address":
@@ -156,7 +202,7 @@
   }
   function renderActions() {
     var box = $("#actions"); box.innerHTML = "";
-    (C.actions || []).forEach(function (a) {
+    (C.actions || []).filter(function (a) { return !a.owner || isOwner; }).forEach(function (a) {
       var form = h("form", {}, h("h3", { text: a.title }), a.desc ? h("p", { class: "desc", text: a.desc }) : null);
       var row = h("div", { class: "row" });
       (a.inputs || []).forEach(function (i) { row.appendChild(field(i)); });
@@ -167,8 +213,24 @@
         ev.preventDefault(); btn.disabled = true;
         try {
           var args = (a.inputs || []).map(function (i) { return parse(i, form); });
-          if (!mainAddr) throw new Error("Deploy or enter the contract address first");
-          await send(a.title, function () { return mainC()[a.fn].apply(null, args); });
+          if (!mainAddr) throw new Error("Set the contract address in config.js");
+          var value = 0n;
+          if (a.valueInput) {
+            // That input is sent as BOT (msg.value) rather than as a function argument
+            var k = (a.inputs || []).findIndex(function (i) { return i.id === a.valueInput; });
+            value = args[k]; args.splice(k, 1);
+          }
+          if (a.valueCopy) {
+            // That input is both a function argument and the BOT sent (e.g. createGroup's deposit)
+            value = args[(a.inputs || []).findIndex(function (i) { return i.id === a.valueCopy; })];
+          }
+          if (a.value) {
+            // BOT to attach, read live from the contract (e.g. fundingPrice(id) or invoices(id).faceValue)
+            var res = await mainC()[a.value.fn].apply(null, args.slice(0, a.value.argc || 1));
+            value = a.value.pick ? res[a.value.pick] : res;
+            if (!confirm(a.title + ": send " + units(value) + " BOT?")) { btn.disabled = false; return; }
+          }
+          await send(a.title, a.fn, args, value);
         } catch (e) { toast(errText(e), { err: true }); }
         btn.disabled = false;
       });
@@ -187,10 +249,11 @@
       form.addEventListener("submit", async function (ev) {
         ev.preventDefault(); out.innerHTML = "";
         try {
-          if (!mainAddr) throw new Error("Deploy or enter the contract address first");
+          if (!mainAddr) throw new Error("Set the contract address in config.js");
           var args = (v.inputs || []).map(function (i) { return parse(i, form); });
           var res = await mainC()[v.fn].apply(null, args);
-          out.appendChild(renderResult(v.fn, res));
+          if (v.fmt) out.appendChild(h("dl", { class: "kv" }, h("dt", { text: "result" }), h("dd", { text: fmt(v.fmt, res) })));
+          else out.appendChild(renderResult(v.fn, res));
         } catch (e) { out.appendChild(h("p", { class: "desc", text: errText(e) })); }
       });
       box.appendChild(h("div", { class: "card qry" }, form));
@@ -211,77 +274,33 @@
       } catch (e) { cell.lastChild.textContent = "n/a"; }
     }));
   }
-  async function renderTokens() {
-    var box = $("#tokens"); box.innerHTML = "";
-    if (!mainAddr || !(C.tokens || []).length) { box.style.display = "none"; return; }
-    box.style.display = "";
-    box.appendChild(h("h2", { text: "Test tokens" }));
-    box.appendChild(h("p", { class: "desc", text: "Get free test tokens, then approve this app to spend them before staking, trading or paying." }));
-    for (var i = 0; i < C.tokens.length; i++) {
-      try {
-        var addr = await mainC()[C.tokens[i]](), t = tokenC(addr), sym = await t.symbol();
-        var bal = account ? await t.balanceOf(account) : null, al = account ? await t.allowance(account, mainAddr) : null;
-        var row = h("div", { class: "tok" }, h("span", { class: "n", text: sym }),
-          h("span", { class: "m" }, addrLink(addr), account ? "  balance " + units(bal) + " · approved " + (al > 2n ** 200n ? "unlimited" : units(al)) : "  connect wallet to see balance"));
-        (function (t, sym) {
-          row.appendChild(h("button", { class: "btn", type: "button", text: "Get 1,000 " + sym, onclick: function () { send("Faucet " + sym, function () { return t.faucet(); }); } }));
-          row.appendChild(h("button", { class: "btn", type: "button", text: "Approve " + sym, onclick: function () { send("Approve " + sym, function () { return t.approve(mainAddr, ethers.MaxUint256); }); } }));
-        })(t, sym);
-        box.appendChild(row);
-      } catch (e) { box.appendChild(h("p", { class: "desc", text: "Could not read token " + C.tokens[i] + ": " + errText(e) })); }
-    }
-  }
   async function refreshAll() {
-    $("#addrInput").value = mainAddr;
-    $("#contractLink").innerHTML = "";
-    if (mainAddr) $("#contractLink").appendChild(addrLink(mainAddr)); else $("#contractLink").textContent = "not yet";
     if (mainAddr) {
-      try { if ((await readProvider.getCode(mainAddr)) === "0x") toast("No contract found at that address on BOT Chain testnet.", { err: true }); } catch (e) {}
+      try { if ((await readProvider.getCode(mainAddr)) === "0x") toast("No contract found at that address on BOT Chain mainnet.", { err: true }); }
+      catch (e) { toast("Could not reach BOT Chain: " + errText(e), { err: true }); }
     }
-    await Promise.all([renderStats(), renderTokens()]);
+    var tk = $("#tokens"); if (tk) tk.style.display = "none";
+    await renderStats();
   }
 
-  // ---------- deploy ----------
-  async function deployAll() {
-    var btn = $("#deployBtn"); btn.disabled = true;
-    try {
-      await ensureWallet();
-      var addrs = [], d = C.deploy;
-      for (var i = 0; i < d.tokens.length; i++) {
-        var t = d.tokens[i], m = toast("Deploying " + t.symbol + " (confirm in wallet)…", { sticky: true });
-        var tf = new ethers.ContractFactory(A.token.abi, A.token.bytecode, signer), tc = await tf.deploy(t.name, t.symbol);
-        await tc.waitForDeployment(); addrs.push(await tc.getAddress()); m.remove();
-      }
-      var args = d.args.map(function (a) { return typeof a === "string" && a.indexOf("$t") === 0 ? addrs[Number(a.slice(2))] : (a === "$me" ? account : a); });
-      var m2 = toast("Deploying " + C.name + " (confirm in wallet)…", { sticky: true });
-      var f = new ethers.ContractFactory(A.main.abi, A.main.bytecode, signer), c = await f.deploy.apply(f, args);
-      await c.waitForDeployment();
-      mainAddr = await c.getAddress(); m2.remove();
-      try { localStorage.setItem(KEY, mainAddr); } catch (e) {}
-      toast(C.name + " deployed at " + short(mainAddr) + " ✓");
-      await refreshAll();
-    } catch (e) { toast("Deploy failed: " + errText(e), { err: true }); }
-    btn.disabled = false;
-  }
+ // ---------- boot ----------
+document.title = C.name + " · BOT Chain";
+document.documentElement.style.setProperty("--accent", C.accent);
+$("#appName").textContent = C.name; $("#tagline").textContent = C.tagline;
 
-  // ---------- boot ----------
-  document.title = C.name + " · BOT Chain Testnet";
-  document.documentElement.style.setProperty("--accent", C.accent);
-  $("#appName").textContent = C.name; $("#tagline").textContent = C.tagline; $("#aboutText").textContent = C.about || "";
-  $("#connectBtn").addEventListener("click", function () { connect().catch(function (e) { toast(errText(e), { err: true }); }); });
-  $("#deployBtn").addEventListener("click", deployAll);
-  $("#saveBtn").addEventListener("click", function () {
-    var v = $("#addrInput").value.trim();
-    if (!ethers.isAddress(v)) return toast("Enter a valid contract address.", { err: true });
-    mainAddr = v; try { localStorage.setItem(KEY, v); } catch (e) {}
-    refreshAll();
-  });
-  if (window.ethereum) {
-    if (window.ethereum.on) {
-      window.ethereum.on("accountsChanged", function () { signer = null; account = null; refreshBadge(); refreshAll(); });
-      window.ethereum.on("chainChanged", function () { window.location.reload(); });
-    }
-    window.ethereum.request({ method: "eth_accounts" }).then(function (a) { if (a && a.length) connect().catch(function () {}); }).catch(function () {});
+// Manual connect button
+$("#connectBtn").addEventListener("click", function () {
+  connect(false).catch(function (e) { toast(errText(e), { err: true }); });
+});
+
+if (window.ethereum) {
+  if (window.ethereum.on) {
+    window.ethereum.on("accountsChanged", function () { window.location.reload(); });
+    window.ethereum.on("chainChanged", function () { refreshBadge(); });
   }
-  renderActions(); renderViews(); refreshAll();
+  // Silent auto-connect on load — no popup, no error toast
+  connect(true).catch(function () {});
+}
+
+renderActions(); renderViews(); refreshAll();
 })();
